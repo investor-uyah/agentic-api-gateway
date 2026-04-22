@@ -3,11 +3,16 @@ from fastapi.responses import HTMLResponse
 from proxy import handle_request
 from metrics import get_metrics, ensure_service
 from config import get_service_from_token, TARGET_API
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
 for service in TARGET_API.keys():
     ensure_service(service)
+
+@app.get("/")
+async def get_dashboard():
+    return FileResponse("dashboard.html")
 
 @app.get("/agent-gateway/v1/{service}")
 async def gateway(service: str, request: Request, x_api_token: str = Header(None)):
@@ -42,7 +47,7 @@ async def metrics_endpoint(x_api_token: str = Header(None)):
         "avg_latency": data["avg_latency"]  # (optional: still global)
     }
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
-    with open("dashboard.html") as f:
-        return f.read()
+# @app.get("/dashboard", response_class=HTMLResponse)
+# async def dashboard():
+#     with open("dashboard.html") as f:
+#         return f.read()
