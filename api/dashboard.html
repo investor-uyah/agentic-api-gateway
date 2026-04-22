@@ -92,26 +92,29 @@
 
 <script>
 let TOKEN = null;
-let lastKnownRequests = -1;
+let lastKnownRequests = null;
 let pollTimer = null;
 
 function startDashboard() {
     const input = document.getElementById("tokenInput");
     TOKEN = input.value;
+
     if (!TOKEN) return alert("Token required");
-    
-    // Clear existing interval if reconnecting
+
+    // Clear previous interval
     if (pollTimer) clearInterval(pollTimer);
-    
-    // UI reset and Logic reset
-    lastKnownRequests = -1; 
-    document.getElementById("metrics").innerHTML = "<p>Connecting...</p>";
-    document.getElementById("history-list").innerHTML = "";
+
+    // Reset state
+    lastKnownRequests = null;
     localStorage.removeItem("metrics_history");
-    
+
+    document.getElementById("metrics").innerHTML = "<p>Connecting...</p>";
+    document.getElementById("history-list").innerHTML =
+        '<p style="color: #475569; font-size: 12px;">Waiting for traffic snapshots...</p>';
+
     loadMetrics();
     pollTimer = setInterval(loadMetrics, 2000);
-    
+
     document.getElementById("login-area").style.opacity = "0.7";
 }
 
@@ -123,76 +126,98 @@ async function loadMetrics() {
             headers: { "X-API-Token": TOKEN }
         });
 
-        if (res.status === 401) throw new Error("Unauthorized: Invalid Token");
+        if (!res.ok) {
+            if (res.status === 401) throw new Error("Unauthorized: Invalid Token");
+            throw new Error(`Error: ${res.status}`);
+        }
+
         const result = await res.json();
 
-        // Safety: Extract nested data structure
+        // Safe extraction (supports both shapes)
         const apiData = result.data || {};
         const summary = apiData.summary || result.summary || {};
         const avgLat = apiData.avg_latency || result.avg_latency || 0;
 
-        const total = summary["Inbound API Requests"] || 0;
-        const hits = summary["Cache Hits"] || 0;
-        const misses = summary["Cache Misses"] || 0;
-        const rate = total > 0 ? ((hits / total) * 100).toFixed(2) : 0;
+        const total = Number(summary["Inbound API Requests"] || 0);
+        const hits = Number(summary["Cache Hits"] || 0);
+        const misses = Number(summary["Cache Misses"] || 0);
+        const rate = total > 0 ? ((hits / total) * 100).toFixed(2) : "0.00";
 
-        // 🟢 Update Last Updated only if traffic exists
-        if (total > 0) {
-            const now = new Date();
-            document.getElementById("last-updated").innerHTML = 
-                `🟢 Live Tracking: <b>${result.service || 'Active Service'}</b> | Last update: ${now.toLocaleTimeString()}`;
-        }
+        const now = new Date();
 
-        // 🟢 Render Metrics Cards
+        // Always update header
+        document.getElementById("last-updated").innerHTML = 
+            `🟢 Live Tracking: <b>${result.service || 'Active Service'}</b> | Last update: ${now.toLocaleTimeString()}`;
+
+        // Render cards
         const container = document.getElementById("metrics");
         container.innerHTML = "";
-        
+
         for (let [key, val] of Object.entries(summary)) {
             container.innerHTML += `<div class="card"><h3>${key}</h3><p>${val}</p></div>`;
         }
-        
+
         container.innerHTML += `<div class="card"><h3>Latency</h3><p>${avgLat}s</p></div>`;
         container.innerHTML += `<div class="card highlight"><h3>Hit Rate</h3><p>${rate}%</p></div>`;
 
-        // 🟢 FIXED HISTORY LOGIC
-        // Only record if total is non-zero AND has actually increased since last check
-        if (total > 0 && total > lastKnownRequests) {
-            saveHistory({
-                time: new Date().toLocaleTimeString(),
-                requests: total,
-                hits: hits,
-                misses: misses,
-                rate: rate
-            });
+        // Initialize baseline (prevents fake spike)
+        if (lastKnownRequests === null) {
             lastKnownRequests = total;
-            renderHistory();
+        } else {
+            const delta = total - lastKnownRequests;
+
+            // Only log real new traffic
+            if (delta > 0) {
+                saveHistory({
+                    time: now.toLocaleTimeString(),
+                    requests: delta, // ✅ important: shows actual activity
+                    hits: hits,
+                    misses: misses,
+                    rate: rate
+                });
+
+                lastKnownRequests = total;
+            }
         }
 
+        // Always render history
+        renderHistory();
+
     } catch (err) {
-        document.getElementById("metrics").innerHTML = `<p style="color:#ef4444; background: #450a0a; padding: 15px; border-radius: 8px;">⚠️ ${err.message}</p>`;
+        document.getElementById("metrics").innerHTML =
+            `<p style="color:#ef4444; background:#450a0a; padding:15px; border-radius:8px;">⚠️ ${err.message}</p>`;
     }
 }
 
 function saveHistory(entry) {
     let history = JSON.parse(localStorage.getItem("metrics_history") || "[]");
-    
-    // Logic fix: Prevent redundant first entries if cumulative total hasn't moved
-    if (history.length > 0 && history[0].requests === entry.requests) return;
 
-    history.unshift(entry); 
-    if (history.length > 10) history = history.slice(0, 10); 
+    // Prevent duplicate entries
+    if (history.length > 0 && history[0].time === entry.time && history[0].requests === entry.requests) {
+        return;
+    }
+
+    history.unshift(entry);
+
+    // Keep last 10
+    if (history.length > 10) {
+        history = history.slice(0, 10);
+    }
+
     localStorage.setItem("metrics_history", JSON.stringify(history));
 }
 
 function renderHistory() {
     const history = JSON.parse(localStorage.getItem("metrics_history") || "[]");
     const container = document.getElementById("history-list");
-    container.innerHTML = "";
 
     if (history.length === 0) {
-        container.innerHTML = '<p style="color: #475569; font-size: 12px;">Waiting for traffic snapshots...</p>';
+        container.innerHTML =
+            '<p style="color: #475569; font-size: 12px;">Waiting for traffic snapshots...</p>';
         return;
     }
+
+    container.innerHTML = "";
 
     history.forEach(item => {
         container.innerHTML += `

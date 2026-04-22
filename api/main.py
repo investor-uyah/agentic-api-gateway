@@ -14,7 +14,7 @@ for service in TARGET_API.keys():
 async def get_dashboard():
     return FileResponse("dashboard.html")
 
-@app.get("/agent-gateway/v1/{service}")
+@app.get("/v1/{service}")
 async def gateway(service: str, request: Request, x_api_token: str = Header(None)):
     # Inject token into params for the proxy to handle verification
     params = dict(request.query_params)
