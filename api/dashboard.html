@@ -36,6 +36,10 @@
         .grid { display: flex; flex-wrap: wrap; }
         .highlight { border: 2px solid var(--accent); }
 
+        #history.hidden {
+        display: none;
+        }
+
         #history { 
             width: 300px; 
             background: #020617; 
@@ -82,7 +86,7 @@
         </div>
     </div>
 
-    <div id="history">
+    <div id="history" class="hidden">
         <h3>📊 Activity History</h3>
         <div id="history-list">
             <p style="color: #475569; font-size: 12px;">Only active traffic snapshots are recorded here.</p>
@@ -92,8 +96,9 @@
 
 <script>
 let TOKEN = null;
-let lastKnownRequests = null;
+let lastKnown = null; // {requests, hits, misses}
 let pollTimer = null;
+let isLoading = false;
 
 function startDashboard() {
     const input = document.getElementById("tokenInput");
@@ -101,11 +106,9 @@ function startDashboard() {
 
     if (!TOKEN) return alert("Token required");
 
-    // Clear previous interval
     if (pollTimer) clearInterval(pollTimer);
 
-    // Reset state
-    lastKnownRequests = null;
+    lastKnown = null;
     localStorage.removeItem("metrics_history");
 
     document.getElementById("metrics").innerHTML = "<p>Connecting...</p>";
@@ -116,10 +119,12 @@ function startDashboard() {
     pollTimer = setInterval(loadMetrics, 2000);
 
     document.getElementById("login-area").style.opacity = "0.7";
+    document.getElementById("history").classList.remove("hidden");
 }
 
 async function loadMetrics() {
-    if (!TOKEN) return;
+    if (!TOKEN || isLoading) return;
+    isLoading = true;
 
     try {
         const res = await fetch(`/metrics`, {
@@ -133,7 +138,6 @@ async function loadMetrics() {
 
         const result = await res.json();
 
-        // Safe extraction (supports both shapes)
         const apiData = result.data || {};
         const summary = apiData.summary || result.summary || {};
         const avgLat = apiData.avg_latency || result.avg_latency || 0;
@@ -141,15 +145,15 @@ async function loadMetrics() {
         const total = Number(summary["Inbound API Requests"] || 0);
         const hits = Number(summary["Cache Hits"] || 0);
         const misses = Number(summary["Cache Misses"] || 0);
-        const rate = total > 0 ? ((hits / total) * 100).toFixed(2) : "0.00";
 
         const now = new Date();
+        const timestamp = now.getTime();
 
-        // Always update header
+        // Header update
         document.getElementById("last-updated").innerHTML = 
             `🟢 Live Tracking: <b>${result.service || 'Active Service'}</b> | Last update: ${now.toLocaleTimeString()}`;
 
-        // Render cards
+        // Render cards (cumulative)
         const container = document.getElementById("metrics");
         container.innerHTML = "";
 
@@ -157,49 +161,59 @@ async function loadMetrics() {
             container.innerHTML += `<div class="card"><h3>${key}</h3><p>${val}</p></div>`;
         }
 
+        const globalRate = total > 0 ? ((hits / total) * 100).toFixed(2) : "0.00";
+
         container.innerHTML += `<div class="card"><h3>Latency</h3><p>${avgLat}s</p></div>`;
-        container.innerHTML += `<div class="card highlight"><h3>Hit Rate</h3><p>${rate}%</p></div>`;
+        container.innerHTML += `<div class="card highlight"><h3>Hit Rate</h3><p>${globalRate}%</p></div>`;
 
-        // Initialize baseline (prevents fake spike)
-        if (lastKnownRequests === null) {
-            lastKnownRequests = total;
+        // Initialize baseline
+        if (!lastKnown) {
+            lastKnown = { requests: total, hits: hits, misses: misses };
         } else {
-            const delta = total - lastKnownRequests;
+            let deltaReq = total - lastKnown.requests;
+            let deltaHit = hits - lastKnown.hits;
+            let deltaMiss = misses - lastKnown.misses;
 
-            // Only log real new traffic
-            if (delta > 0) {
+            // Handle resets (server restart etc.)
+            if (deltaReq < 0 || deltaHit < 0 || deltaMiss < 0) {
+                lastKnown = { requests: total, hits: hits, misses: misses };
+            } else if (deltaReq > 0) {
+                const intervalRate = deltaReq > 0
+                    ? ((deltaHit / deltaReq) * 100).toFixed(2)
+                    : "0.00";
+
                 saveHistory({
+                    id: timestamp,
                     time: now.toLocaleTimeString(),
-                    requests: delta, // ✅ important: shows actual activity
-                    hits: hits,
-                    misses: misses,
-                    rate: rate
+                    requests: deltaReq,
+                    hits: deltaHit,
+                    misses: deltaMiss,
+                    rate: intervalRate
                 });
 
-                lastKnownRequests = total;
+                lastKnown = { requests: total, hits: hits, misses: misses };
+                renderHistory();
             }
         }
-
-        // Always render history
-        renderHistory();
 
     } catch (err) {
         document.getElementById("metrics").innerHTML =
             `<p style="color:#ef4444; background:#450a0a; padding:15px; border-radius:8px;">⚠️ ${err.message}</p>`;
+    } finally {
+        isLoading = false;
     }
 }
 
 function saveHistory(entry) {
     let history = JSON.parse(localStorage.getItem("metrics_history") || "[]");
 
-    // Prevent duplicate entries
-    if (history.length > 0 && history[0].time === entry.time && history[0].requests === entry.requests) {
+    // Prevent duplicates using unique id
+    if (history.length > 0 && history[0].id === entry.id) {
         return;
     }
 
     history.unshift(entry);
 
-    // Keep last 10
     if (history.length > 10) {
         history = history.slice(0, 10);
     }

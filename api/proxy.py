@@ -1,9 +1,9 @@
 import httpx
 import time
 import asyncio
-from config import TARGET_API, get_service_from_token
-from cache import get_or_wait, set_in_flight, store_result, get_lock, in_flight, cache
-from metrics import record_request, record_hit, record_miss, record_swr, record_error, record_latency
+from api.config import TARGET_API, get_service_from_token
+from api.cache import get_or_wait, set_in_flight, store_result, get_lock, in_flight, cache
+from api.metrics import record_request, record_hit, record_miss, record_swr, record_error, record_latency
 
 client = httpx.AsyncClient()
 
@@ -15,10 +15,8 @@ async def fetch_from_api(url, params):
 
 async def handle_request(service, params):
     start_time = time.time()
-    
-    # --- SECURITY CHECK ---
-    target = TARGET_API.get(service)
 
+    target = TARGET_API.get(service)
     if not target:
         return {"status": "error", "message": "Service not supported"}
 
@@ -30,51 +28,95 @@ async def handle_request(service, params):
         ttl = target.get("ttl", 60)
         key = f"{service}:{str(sorted(params.items()))}"
 
+        # ----------------------------
         # 1. NO CACHE
+        # ----------------------------
         if strategy == "no_cache":
+            data = await safe_fetch(url, params)
             record_miss(service)
-            return await fetch_from_api(url, params)
+            return data
 
-        # 2. CACHE HIT
-        entry = await get_or_wait(key)
+        # ----------------------------
+        # 2. CHECK CACHE (single entry point)
+        # ----------------------------
+        entry = cache.get(key)
+
+        # ---- CACHE HIT (TTL or SWR base) ----
         if entry:
-            record_hit(service)
-            return entry
-
-        # 3. SWR (Background Refresh)
-        if strategy == "swr":
-            cached = cache.get(key)
-            if cached:
+            # SWR handling (only here — no duplicate paths)
+            if strategy == "swr":
                 lock = get_lock(key)
+
                 if not lock.locked() and key not in in_flight:
                     async def refresh():
                         async with lock:
                             try:
-                                data = await fetch_from_api(url, params)
+                                data = await safe_fetch(url, params)
                                 await store_result(key, data, ttl)
-                            except: record_error(service)
+                            except:
+                                record_error(service)
+
                     asyncio.create_task(refresh())
+
                 record_hit(service)
                 record_swr(service)
-                return cached["data"]
+                return entry["data"]
 
-        # 4. COLD START / TTL
+            # Normal TTL hit
+            record_hit(service)
+            return entry["data"]
+
+        # ----------------------------
+        # 3. CACHE MISS (single path)
+        # ----------------------------
         lock = get_lock(key)
-        async with lock:
-            entry = await get_or_wait(key)
-            if entry: return entry
 
-            async def task():
-                data = await fetch_from_api(url, params)
-                await store_result(key, data, ttl)
-                record_miss(service)
-                return data
-            
-            task_obj = await set_in_flight(key, task())
-            return await task_obj
+        async with lock:
+            # Double-check cache after acquiring lock
+            entry = cache.get(key)
+            if entry:
+                record_hit(service)
+                return entry["data"]
+
+            # True miss — fetch + store
+            data = await safe_fetch(url, params)
+            await store_result(key, data, ttl)
+
+            record_miss(service)
+            return data
 
     except Exception as e:
         record_error(service)
         return {"status": "error", "message": str(e)}
+
     finally:
         record_latency(time.time() - start_time)
+
+
+async def safe_fetch(url, params):
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        response = await client.get(url, params=params, timeout=20.0)
+
+        content_type = response.headers.get("content-type", "")
+
+        # ✅ Valid JSON
+        if "application/json" in content_type:
+            try:
+                return response.json()
+            except Exception:
+                return {
+                    "status": "error",
+                    "message": "Invalid JSON from upstream",
+                    "status_code": response.status_code,
+                    "preview": response.text[:200]
+                }
+
+        # ❌ Not JSON (e.g., login page, HTML, redirect)
+        return {
+            "status": "error",
+            "message": "Upstream did not return JSON",
+            "status_code": response.status_code,
+            "content_type": content_type,
+            "url": str(response.url),
+            "preview": response.text[:200]
+        }

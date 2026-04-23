@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import HTMLResponse
-from proxy import handle_request
-from metrics import get_metrics, ensure_service
-from config import get_service_from_token, TARGET_API
+from api.proxy import handle_request
+from api.metrics import get_metrics, ensure_service
+from api.config import get_service_from_token, TARGET_API
 from fastapi.responses import FileResponse
+import os
 
 app = FastAPI()
 
@@ -12,7 +13,8 @@ for service in TARGET_API.keys():
 
 @app.get("/")
 async def get_dashboard():
-    return FileResponse("dashboard.html")
+    file_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+    return FileResponse(file_path)
 
 @app.get("/v1/{service:path}")
 async def gateway(service: str, request: Request):
